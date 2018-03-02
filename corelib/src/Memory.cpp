@@ -64,6 +64,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 namespace rtabmap {
 
 const int Memory::kIdStart = 0;
+const int Memory::kMapIdStart = 0;	// RST_Vallejo: Start point for the maps IDs in case they are use for identifying robot number in Multirobot Mode
 const int Memory::kIdVirtual = -1;
 const int Memory::kIdInvalid = 0;
 
@@ -96,10 +97,13 @@ Memory::Memory(const ParametersMap & parameters) :
 	_rehearsalMaxAngle(Parameters::defaultRGBDAngularUpdate()),
 	_rehearsalWeightIgnoredWhileMoving(Parameters::defaultMemRehearsalWeightIgnoredWhileMoving()),
 	_useOdometryFeatures(Parameters::defaultMemUseOdomFeatures()),
+	_multiRobotMode(Parameters::defaultMemMultiRobotMode()),		// RST_Vallejo: Parameter for Client side when in Multirobot mode
+	_multiRobotMaster(Parameters::defaultMemMultiRobotMaster()),		// RST_Vallejo: Parameter for Client side when in Multirobot mode
+	_clientRobotNumber(Parameters::defaultMemClientRobotNumber()),		// RST_Vallejo: Number of client Robot when in Multirobot mode
 	_createOccupancyGrid(Parameters::defaultRGBDCreateOccupancyGrid()),
 	_visMaxFeatures(Parameters::defaultVisMaxFeatures()),
 	_idCount(kIdStart),
-	_idMapCount(kIdStart),
+	_idMapCount(kMapIdStart),
 	_lastSignature(0),
 	_lastGlobalLoopClosureId(0),
 	_memoryChanged(false),
@@ -146,6 +150,8 @@ bool Memory::init(const std::string & dbUrl, bool dbOverwritten, const Parameter
 	{
 		_dbDriver = tmpDriver;
 	}
+
+	UDEBUG("---ids start with %d", _idCount);
 
 	if(_dbDriver)
 	{
@@ -238,7 +244,15 @@ void Memory::loadDataFromDb(bool postInitClosingEvents)
 
 		// Last id
 		_dbDriver->getLastNodeId(_idCount);
-		_idMapCount = _lastSignature?_lastSignature->mapId()+1:kIdStart;
+
+		if(_multiRobotMode && !_multiRobotMaster) 	// RST_Vallejo: Condition only when in Multirobot Mode and client robot
+		{
+			_idCount = _clientRobotNumber*1000000 - 1000000; 	// RST_Vallejo: Only use for client robot. TODO: Include Robot Number functionality to MapData
+		}
+
+		UDEBUG("---ids start with %d", _idCount);
+
+		_idMapCount = _lastSignature?_lastSignature->mapId()+1:kMapIdStart;
 
 		// Now load the dictionary if we have a connection
 		if(postInitClosingEvents) UEventsManager::post(new RtabmapEventInit("Loading dictionary..."));
@@ -329,7 +343,7 @@ void Memory::loadDataFromDb(bool postInitClosingEvents)
 	else
 	{
 		_idCount = kIdStart;
-		_idMapCount = kIdStart;
+		_idMapCount = kMapIdStart;
 	}
 
 	_workingMem.insert(std::make_pair(kIdVirtual, 0));
@@ -458,6 +472,9 @@ void Memory::parseParameters(const ParametersMap & parameters)
 	Parameters::parse(parameters, Parameters::kRGBDAngularUpdate(), _rehearsalMaxAngle);
 	Parameters::parse(parameters, Parameters::kMemRehearsalWeightIgnoredWhileMoving(), _rehearsalWeightIgnoredWhileMoving);
 	Parameters::parse(parameters, Parameters::kMemUseOdomFeatures(), _useOdometryFeatures);
+	Parameters::parse(parameters, Parameters::kMemMultiRobotMode(), _multiRobotMode);		// RST_Vallejo
+	Parameters::parse(parameters, Parameters::kMemMultiRobotMaster(), _multiRobotMaster);	// RST_Vallejo
+	Parameters::parse(parameters, Parameters::kMemClientRobotNumber(), _clientRobotNumber);	// RST_Vallejo
 	Parameters::parse(parameters, Parameters::kRGBDCreateOccupancyGrid(), _createOccupancyGrid);
 	Parameters::parse(parameters, Parameters::kVisMaxFeatures(), _visMaxFeatures);
 
@@ -620,6 +637,8 @@ bool Memory::update(
 	if(stats) stats->addStatistic(Statistics::kTimingMemPre_update(), t);
 	UDEBUG("time preUpdate=%f ms", t);
 
+	UDEBUG("memory update:  ids start with %d", _idCount);
+
 	//============================================================
 	// Create a signature with the image received.
 	//============================================================
@@ -675,7 +694,7 @@ bool Memory::update(
 	// Transfer the oldest signature of the short-term memory to the working memory
 	//============================================================
 	int notIntermediateNodesCount = 0;
-	for(std::set<int>::iterator iter=_stMem.begin(); iter!=_stMem.end(); ++iter)
+	for(std::deque<int>::iterator iter=_stMem.begin(); iter!=_stMem.end(); ++iter)	// RST_Vallejo: STM as queue
 	{
 		const Signature * s = this->getSignature(*iter);
 		UASSERT(s != 0);
@@ -713,6 +732,228 @@ bool Memory::update(
 	UDEBUG("totalTimer = %fs", totalTimer.ticks());
 
 	return true;
+}
+
+// RST_Vallejo: Modified function created for MapOptimizerServer, which directly receives signature information
+
+bool Memory::update(
+		Signature * clientSignature,
+		const std::map<int, rtabmap::Transform> & clientPoses,
+		const std::multimap<int, rtabmap::Link> & clientLinks,
+		const std::vector<float> & velocity,
+		Statistics * stats)
+{
+	UDEBUG("");
+	UTimer timer;
+	UTimer totalTimer;
+	timer.start();
+	float t;
+
+	//============================================================
+	// Pre update...
+	//============================================================
+	UDEBUG("pre-updating...");
+	this->preUpdate();
+	t=timer.ticks()*1000;
+	if(stats) stats->addStatistic(Statistics::kTimingMemPre_update(), t);
+	UDEBUG("time preUpdate=%f ms", t);
+
+	UDEBUG("memory update:  ids start with %d", _idCount);
+
+	//============================================================
+	// Process the client signature received.
+	//============================================================
+	Signature * signature = this->processSignature(clientSignature, stats);
+	if(signature == 0)
+	{
+		UERROR("Failed to process a client signature...");
+		return false;
+	}
+	if(velocity.size()==6)
+	{
+		signature->setVelocity(velocity[0], velocity[1], velocity[2], velocity[3], velocity[4], velocity[5]);
+	}
+
+	t=timer.ticks()*1000;
+	if(stats) stats->addStatistic(Statistics::kTimingMemSignature_creation(), t);
+	UDEBUG("time creating signature=%f ms", t);
+
+	// It will be added to the short-term memory, no need to delete it...
+	this->addSignatureToStm(signature, clientPoses, clientLinks);
+
+	_lastSignature = signature;
+
+	//============================================================
+	// Rehearsal step...
+	// Compare with the X last signatures. If different, add this
+	// signature like a parent to the memory tree, otherwise add
+	// it as a child to the similar signature.
+	//============================================================
+	if(_incrementalMemory)
+	{
+		if(_similarityThreshold < 1.0f)
+		{
+			this->rehearsal(signature, stats);
+		}
+		t=timer.ticks()*1000;
+		if(stats) stats->addStatistic(Statistics::kTimingMemRehearsal(), t);
+		UDEBUG("time rehearsal=%f ms", t);
+	}
+	else //if(!_incrementalMemory)
+	{
+		if(_workingMem.size() <= 1)
+		{
+			UWARN("The working memory is empty and the memory is not "
+				  "incremental (Mem/IncrementalMemory=False), no loop closure "
+				  "can be detected! Please set Mem/IncrementalMemory=true to increase "
+				  "the memory with new images or decrease the STM size (which is %d "
+				  "including the new one added).", (int)_stMem.size());
+		}
+	}
+
+	//============================================================
+	// Transfer the oldest signature of the short-term memory to the working memory
+	//============================================================
+	int notIntermediateNodesCount = 0;
+	for(std::deque<int>::iterator iter=_stMem.begin(); iter!=_stMem.end(); ++iter)	// RST_Vallejo: STM as queue
+	{
+		const Signature * s = this->getSignature(*iter);
+		UASSERT(s != 0);
+		if(s->getWeight() >= 0)
+		{
+			++notIntermediateNodesCount;
+		}
+	}
+	std::map<int, int> reducedIds;
+	while(_stMem.size() && _maxStMemSize>0 && notIntermediateNodesCount > _maxStMemSize)
+	{
+		int id = *_stMem.begin();
+		Signature * s = this->_getSignature(id);
+		UASSERT(s != 0);
+		if(s->getWeight() >= 0)
+		{
+			--notIntermediateNodesCount;
+		}
+
+		int reducedTo = 0;
+		moveSignatureToWMFromSTM(id, &reducedTo);
+
+		if(reducedTo > 0)
+		{
+			reducedIds.insert(std::make_pair(id, reducedTo));
+		}
+	}
+	if(stats) stats->setReducedIds(reducedIds);
+
+	if(!_memoryChanged && _incrementalMemory)
+	{
+		_memoryChanged = true;
+	}
+
+	UDEBUG("totalTimer = %fs", totalTimer.ticks());
+
+	return true;
+}
+
+// RST_Vallejo: Modified addSignatureToStm function for Multirobot environment
+void Memory::addSignatureToStm(
+		Signature * signature,
+		const std::map<int, rtabmap::Transform> & clientPoses,
+		const std::multimap<int, rtabmap::Link> & clientLinks)
+{
+	UTimer timer;
+	// add signature on top of the short-term memory
+	if(signature)
+	{
+		UDEBUG("adding %d", signature->id());
+
+		unsigned int robotNumber = this->getRobotNum(signature);	// RST_Vallejo: Extracting Robot Number to process
+
+		if(_stMem.size())
+		{
+			for(std::map<int, Signature*>::const_reverse_iterator iter = _signatures.rbegin(); iter!=_signatures.rend(); ++iter)
+			{
+				// if(abs(signature->id() - iter->first) < 100000) // RST_Vallejo: Old working condition without robot numbers (Same robot)
+				if(robotNumber == this->getRobotNum(iter->second))	// RST_Vallejo: Setting Neighbor links only on respective robot 
+				{
+					if(_signatures.at(iter->first)->mapId() == signature->mapId())
+					{
+						Transform motionEstimate;
+						if(!signature->getPose().isNull() &&
+						!_signatures.at(iter->first)->getPose().isNull())
+						{
+							UASSERT(signature->getPoseCovariance().cols == 6 && signature->getPoseCovariance().rows == 6 && signature->getPoseCovariance().type() == CV_64FC1);
+							cv::Mat infMatrix = signature->getPoseCovariance().inv();
+							if((uIsFinite(signature->getPoseCovariance().at<double>(0,0)) && signature->getPoseCovariance().at<double>(0,0)>0.0) &&
+								!(uIsFinite(infMatrix.at<double>(0,0)) && infMatrix.at<double>(0,0)>0.0))
+							{
+								UERROR("Failed to invert the covariance matrix! Covariance matrix should be invertible!");
+								std::cout << "Covariance: " << signature->getPoseCovariance() << std::endl;
+								infMatrix = cv::Mat::eye(6,6,CV_64FC1);
+							}
+							motionEstimate = _signatures.at(iter->first)->getPose().inverse() * signature->getPose();
+							_signatures.at(iter->first)->addLink(Link(iter->first, signature->id(), Link::kNeighbor, motionEstimate, infMatrix));
+							signature->addLink(Link(signature->id(), iter->first, Link::kNeighbor, motionEstimate.inverse(), infMatrix));
+						}
+						else
+						{
+							_signatures.at(iter->first)->addLink(Link(iter->first, signature->id(), Link::kNeighbor, Transform()));
+							signature->addLink(Link(signature->id(), iter->first, Link::kNeighbor, Transform()));
+						}
+						UDEBUG("Min/Oldest STM id = %d", *_stMem.begin());
+					}
+					else
+					{
+						UDEBUG("Ignoring neighbor link between %d and %d because they are not in the same map! (%d vs %d)",
+								iter->first, signature->id(),
+								_signatures.at(iter->first)->mapId(), signature->mapId());
+
+						//Tag the first node of the map
+						std::string tag = uFormat("map%d", signature->mapId());
+						if(getSignatureIdByLabel(tag, false) == 0)
+						{
+							UINFO("Tagging node %d with label \"%s\"", signature->id(), tag.c_str());
+							signature->setLabel(tag);
+						}
+					}
+					break;
+				} // RST_Vallejo: TODO: (else if) Check what happens when neighbor is not on STM (Should not happen)
+			}
+		}
+		else if(_mapLabelsAdded)		// RST_Vallejo: TODO: check if we need to tag the node again as is already tagged from the client robot
+		{
+			//Tag the first node of the map
+			std::string tag = uFormat("map%d", signature->mapId());
+			if(getSignatureIdByLabel(tag, false) == 0)
+			{
+				UINFO("Tagging node %d with label \"%s\"", signature->id(), tag.c_str());
+				signature->setLabel(tag);
+			}
+		}
+
+		_signatures.insert(_signatures.end(), std::pair<int, Signature *>(signature->id(), signature));
+		_stMem.insert(_stMem.end(), signature->id());
+		++_signaturesAdded;
+
+		if(_vwd)
+		{
+			UDEBUG("%d words ref for the signature %d", signature->getWords().size(), signature->id());
+		}
+		if(signature->getWords().size())
+		{
+			signature->setEnabled(true);
+		}
+	}
+
+	UDEBUG("time = %fs", timer.ticks());
+}
+
+// RST_Vallejo: Function to extract robot number information from the Client Signature received (Multirobot Mode)
+unsigned int Memory::getRobotNum(Signature * clientSignature)
+{
+	const unsigned int robotIdDiv = 1000000;	// RST_Vallejo: TODO: After getting a stable code, include a variable in MapData for robotNum or use MapId
+	unsigned int robotNumber = (unsigned int)clientSignature->id()/robotIdDiv;
+	return robotNumber;
 }
 
 void Memory::addSignatureToStm(Signature * signature, const cv::Mat & covariance)
@@ -812,7 +1053,7 @@ void Memory::addSignatureToWmFromLTM(Signature * signature)
 void Memory::moveSignatureToWMFromSTM(int id, int * reducedTo)
 {
 	UDEBUG("Inserting node %d from STM in WM...", id);
-	UASSERT(_stMem.find(id) != _stMem.end());
+	UASSERT(std::find(_stMem.begin(), _stMem.end(), id) != _stMem.end());		// RST_Vallejo: STM as queue
 	Signature * s = this->_getSignature(id);
 	UASSERT(s!=0);
 
@@ -905,7 +1146,7 @@ void Memory::moveSignatureToWMFromSTM(int id, int * reducedTo)
 	if(s != 0)
 	{
 		_workingMem.insert(_workingMem.end(), std::make_pair(*_stMem.begin(), UTimer::now()));
-		_stMem.erase(*_stMem.begin());
+		_stMem.erase(_stMem.begin());
 	}
 	// else already removed from STM/WM in moveToTrash()
 }
@@ -1406,7 +1647,7 @@ void Memory::clear()
 	_lastSignature = 0;
 	_lastGlobalLoopClosureId = 0;
 	_idCount = kIdStart;
-	_idMapCount = kIdStart;
+	_idMapCount = kMapIdStart;
 	_memoryChanged = false;
 	_linksChanged = false;
 	_gpsOrigin = GPS();
@@ -1786,7 +2027,7 @@ std::list<Signature *> Memory::getRemovableSignatures(int count, const std::set<
 		bool recentWmImmunized = false;
 		// look for the position of the lastLoopClosureId in WM
 		int currentRecentWmSize = 0;
-		if(_lastGlobalLoopClosureId > 0 && _stMem.find(_lastGlobalLoopClosureId) == _stMem.end())
+		if(_lastGlobalLoopClosureId > 0 && std::find(_stMem.begin(), _stMem.end(), _lastGlobalLoopClosureId) == _stMem.end())	// RST_Vallejo: STM as queue
 		{
 			// If set, it must be in WM
 			std::map<int, double>::const_iterator iter = _workingMem.find(_lastGlobalLoopClosureId);
@@ -1829,7 +2070,7 @@ std::list<Signature *> Memory::getRemovableSignatures(int count, const std::set<
 					bool foundInSTM = false;
 					for(std::map<int, Link>::const_iterator iter = s->getLinks().begin(); iter!=s->getLinks().end(); ++iter)
 					{
-						if(_stMem.find(iter->first) != _stMem.end())
+						if(std::find(_stMem.begin(), _stMem.end(), iter->first) != _stMem.end())	// RST_Vallejo: STM as queue
 						{
 							UDEBUG("Ignored %d because it has a link (%d) to STM", s->id(), iter->first);
 							foundInSTM = true;
@@ -1907,6 +2148,8 @@ void Memory::moveToTrash(Signature * s, bool keepLinkedToGraph, std::list<int> *
 	UDEBUG("id=%d", s?s->id():0);
 	if(s)
 	{
+		int recoverLastId = 0; // RST_Vallejo: In Multirobot mode, we need to identify the last working signature after removing a nonmoving signature
+
 		// If not saved to database or it is a bad signature (not saved), remove links!
 		if(!keepLinkedToGraph || (!s->isSaved() && s->isBadSignature() && _badSignaturesIgnored))
 		{
@@ -1939,6 +2182,11 @@ void Memory::moveToTrash(Signature * s, bool keepLinkedToGraph, std::list<int> *
 					}
 
 					sTo->removeLink(s->id());
+
+					if(iter->second.type() == Link::kNeighbor)
+					{
+						recoverLastId=iter->first;
+					}
 				}
 
 			}
@@ -1977,7 +2225,7 @@ void Memory::moveToTrash(Signature * s, bool keepLinkedToGraph, std::list<int> *
 		}
 
 		_workingMem.erase(s->id());
-		_stMem.erase(s->id());
+		_stMem.erase(std::find(_stMem.begin(), _stMem.end(), s->id()));
 		_signatures.erase(s->id());
 		if(_signaturesAdded>0)
 		{
@@ -1989,11 +2237,25 @@ void Memory::moveToTrash(Signature * s, bool keepLinkedToGraph, std::list<int> *
 			_lastSignature = 0;
 			if(_stMem.size())
 			{
-				_lastSignature = this->_getSignature(*_stMem.rbegin());
+				if(recoverLastId!=0)		// RST_Vallejo: Check whether this may not happen when the last signature is erased
+				{
+					_lastSignature = this->_getSignature(recoverLastId);
+				}
+				else
+				{
+					_lastSignature = this->_getSignature(*_stMem.rbegin());
+				}
 			}
 			else if(_workingMem.size())
 			{
-				_lastSignature = this->_getSignature(_workingMem.rbegin()->first);
+				if(recoverLastId!=0)
+				{
+					_lastSignature = this->_getSignature(recoverLastId);
+				}
+				else
+				{
+					_lastSignature = this->_getSignature(_workingMem.rbegin()->first);
+				}
 			}
 		}
 
@@ -2866,7 +3128,7 @@ void Memory::rehearsal(Signature * signature, Statistics * stats)
 	// Compare with the last (not intermediate node)
 	//============================================================
 	Signature * sB = 0;
-	for(std::set<int>::reverse_iterator iter=_stMem.rbegin(); iter!=_stMem.rend(); ++iter)
+	for(std::deque<int>::reverse_iterator iter=_stMem.rbegin(); iter!=_stMem.rend(); ++iter)	// RST_Vallejo: STM as queue
 	{
 		Signature * s = this->_getSignature(*iter);
 		UASSERT(s!=0);
@@ -4052,6 +4314,697 @@ Signature * Memory::createSignature(const SensorData & data, const Transform & p
 			}*/
 		}
 	}
+
+	UDEBUG("ID of Signature Created %d", id);
+
+	return s;
+}
+
+// RST_Vallejo: Fuction created to process the client signature received in Multirobot mode
+Signature * Memory::processSignature(
+		Signature * clientSignature,
+		Statistics * stats)
+{
+	UDEBUG("Processing Signature id: %d", clientSignature->id());
+	
+	UASSERT(_feature2D != 0);
+
+	PreUpdateThread preUpdateThread(_vwd);
+
+	UTimer timer;
+	timer.start();
+	float t;
+	std::vector<cv::KeyPoint> keypoints;
+	cv::Mat descriptors;
+	bool isIntermediateNode = clientSignature->getWeight() < 0 || clientSignature->sensorData().imageRaw().empty();
+	int id = clientSignature->id();
+	_idCount = id;
+
+	int treeSize= int(_workingMem.size() + _stMem.size());
+	int meanWordsPerLocation = 0;
+	if(treeSize > 0)
+	{
+		meanWordsPerLocation = _vwd->getTotalActiveReferences() / treeSize;
+	}
+
+	if(_parallelized)
+	{
+		UDEBUG("Start dictionary update thread");
+		preUpdateThread.start();
+	}
+
+	int preDecimation = 1;
+	std::vector<cv::Point3f> keypoints3D;
+	if(!_useOdometryFeatures || clientSignature->sensorData().keypoints().empty() || 
+		(int)clientSignature->sensorData().keypoints().size() != clientSignature->sensorData().descriptors().rows)
+	{
+		if(_feature2D->getMaxFeatures() >= 0 && !clientSignature->sensorData().imageRaw().empty() && !isIntermediateNode)
+		{
+			SensorData decimatedData = clientSignature->sensorData();
+			if(_imagePreDecimation > 1)
+			{
+				preDecimation = _imagePreDecimation;
+				if(!decimatedData.rightRaw().empty() ||
+					(decimatedData.depthRaw().rows == decimatedData.imageRaw().rows && decimatedData.depthRaw().cols == decimatedData.imageRaw().cols))
+				{
+					decimatedData.setDepthOrRightRaw(util2d::decimate(decimatedData.depthOrRightRaw(), _imagePreDecimation));
+				}
+				decimatedData.setImageRaw(util2d::decimate(decimatedData.imageRaw(), _imagePreDecimation));
+				std::vector<CameraModel> cameraModels = decimatedData.cameraModels();
+				for(unsigned int i=0; i<cameraModels.size(); ++i)
+				{
+					cameraModels[i] = cameraModels[i].scaled(1.0/double(_imagePreDecimation));
+				}
+				decimatedData.setCameraModels(cameraModels);
+				StereoCameraModel stereoModel = decimatedData.stereoCameraModel();
+				if(stereoModel.isValidForProjection())
+				{
+					stereoModel.scale(1.0/double(_imagePreDecimation));
+				}
+				decimatedData.setStereoCameraModel(stereoModel);
+			}
+
+			UINFO("Extract features");
+			cv::Mat imageMono;
+			if(decimatedData.imageRaw().channels() == 3)
+			{
+				cv::cvtColor(decimatedData.imageRaw(), imageMono, CV_BGR2GRAY);
+			}
+			else
+			{
+				imageMono = decimatedData.imageRaw();
+			}
+
+			cv::Mat depthMask;
+			if(!decimatedData.depthRaw().empty())
+			{
+				if(imageMono.rows % decimatedData.depthRaw().rows == 0 &&
+					imageMono.cols % decimatedData.depthRaw().cols == 0 &&
+					imageMono.rows/decimatedData.depthRaw().rows == imageMono.cols/decimatedData.depthRaw().cols)
+				{
+					depthMask = util2d::interpolate(decimatedData.depthRaw(), imageMono.rows/decimatedData.depthRaw().rows, 0.1f);
+				}
+			}
+
+			int oldMaxFeatures = _feature2D->getMaxFeatures();
+			UDEBUG("rawDescriptorsKept=%d, pose=%d, maxFeatures=%d, visMaxFeatures=%d", _rawDescriptorsKept?1:0, clientSignature->getPose().isNull()?0:1, _feature2D->getMaxFeatures(), _visMaxFeatures);
+			ParametersMap tmpMaxFeatureParameter;
+			if(_rawDescriptorsKept&&!clientSignature->getPose().isNull()&&_feature2D->getMaxFeatures()>0&&_feature2D->getMaxFeatures()<_visMaxFeatures)
+			{
+				// The total extracted features should match the number of features used for transformation estimation
+				UDEBUG("Changing temporary max features from %d to %d", _feature2D->getMaxFeatures(), _visMaxFeatures);
+				tmpMaxFeatureParameter.insert(ParametersPair(Parameters::kKpMaxFeatures(), uNumber2Str(_visMaxFeatures)));
+				_feature2D->parseParameters(tmpMaxFeatureParameter);
+			}
+
+			keypoints = _feature2D->generateKeypoints(
+					imageMono,
+					depthMask);
+
+			if(tmpMaxFeatureParameter.size())
+			{
+				tmpMaxFeatureParameter.at(Parameters::kKpMaxFeatures()) = uNumber2Str(oldMaxFeatures);
+				_feature2D->parseParameters(tmpMaxFeatureParameter); // reset back
+			}
+			t = timer.ticks();
+			if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_detection(), t*1000.0f);
+			UDEBUG("time keypoints (%d) = %fs", (int)keypoints.size(), t);
+
+			descriptors = _feature2D->generateDescriptors(imageMono, keypoints);
+			t = timer.ticks();
+			if(stats) stats->addStatistic(Statistics::kTimingMemDescriptors_extraction(), t*1000.0f);
+			UDEBUG("time descriptors (%d) = %fs", descriptors.rows, t);
+
+			UDEBUG("ratio=%f, meanWordsPerLocation=%d", _badSignRatio, meanWordsPerLocation);
+			if(descriptors.rows && descriptors.rows < _badSignRatio * float(meanWordsPerLocation))
+			{
+				descriptors = cv::Mat();
+			}
+			else if((!decimatedData.depthRaw().empty() && decimatedData.cameraModels().size() && decimatedData.cameraModels()[0].isValidForProjection()) ||
+					(!decimatedData.rightRaw().empty() && decimatedData.stereoCameraModel().isValidForProjection()))
+			{
+				keypoints3D = _feature2D->generateKeypoints3D(decimatedData, keypoints);
+				t = timer.ticks();
+				if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_3D(), t*1000.0f);
+				UDEBUG("time keypoints 3D (%d) = %fs", (int)keypoints3D.size(), t);
+			}
+		}
+		else if(clientSignature->sensorData().imageRaw().empty())
+		{
+			UDEBUG("Empty image, cannot extract features...");
+		}
+		else if(_feature2D->getMaxFeatures() < 0)
+		{
+			UDEBUG("_feature2D->getMaxFeatures()(%d<0) so don't extract any features...", _feature2D->getMaxFeatures());
+		}
+		else
+		{
+			UDEBUG("Intermediate node detected, don't extract features!");
+		}
+	}
+	else if(_feature2D->getMaxFeatures() >= 0 && !isIntermediateNode)
+	{
+		UINFO("Use odometry features");
+		keypoints = clientSignature->sensorData().keypoints();
+		keypoints3D = clientSignature->sensorData().keypoints3D();
+		descriptors = clientSignature->sensorData().descriptors().clone();
+
+		UASSERT(descriptors.empty() || descriptors.rows == (int)keypoints.size());
+		UASSERT(keypoints3D.empty() || keypoints3D.size() == keypoints.size());
+
+		int maxFeatures = _rawDescriptorsKept&&!clientSignature->getPose().isNull()&&_feature2D->getMaxFeatures()>0&&_feature2D->getMaxFeatures()<_visMaxFeatures?_visMaxFeatures:_feature2D->getMaxFeatures();
+		if((int)keypoints.size() > maxFeatures)
+		{
+			_feature2D->limitKeypoints(keypoints, keypoints3D, descriptors, maxFeatures);
+		}
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_detection(), t*1000.0f);
+		UDEBUG("time keypoints (%d) = %fs", (int)keypoints.size(), t);
+
+		if(descriptors.empty())
+		{
+			cv::Mat imageMono;
+			if(clientSignature->sensorData().imageRaw().channels() == 3)
+			{
+				cv::cvtColor(clientSignature->sensorData().imageRaw(), imageMono, CV_BGR2GRAY);
+			}
+			else
+			{
+				imageMono = clientSignature->sensorData().imageRaw();
+			}
+
+			descriptors = _feature2D->generateDescriptors(imageMono, keypoints);
+		}
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemDescriptors_extraction(), t*1000.0f);
+		UDEBUG("time descriptors (%d) = %fs", descriptors.rows, t);
+
+		if(keypoints3D.empty() &&
+			((!clientSignature->sensorData().depthRaw().empty() && clientSignature->sensorData().cameraModels().size() && 
+			clientSignature->sensorData().cameraModels()[0].isValidForProjection()) ||
+		   (!clientSignature->sensorData().rightRaw().empty() && clientSignature->sensorData().stereoCameraModel().isValidForProjection())))
+		{
+			keypoints3D = _feature2D->generateKeypoints3D(clientSignature->sensorData(), keypoints);
+			if(_feature2D->getMinDepth() > 0.0f || _feature2D->getMaxDepth() > 0.0f)
+			{
+				UDEBUG("");
+				//remove all keypoints/descriptors with no valid 3D points
+				UASSERT((int)keypoints.size() == descriptors.rows &&
+						keypoints3D.size() == keypoints.size());
+				std::vector<cv::KeyPoint> validKeypoints(keypoints.size());
+				std::vector<cv::Point3f> validKeypoints3D(keypoints.size());
+				cv::Mat validDescriptors(descriptors.size(), descriptors.type());
+
+				int oi=0;
+				for(unsigned int i=0; i<keypoints3D.size(); ++i)
+				{
+					if(util3d::isFinite(keypoints3D[i]))
+					{
+						validKeypoints[oi] = keypoints[i];
+						validKeypoints3D[oi] = keypoints3D[i];
+						descriptors.row(i).copyTo(validDescriptors.row(oi));
+						++oi;
+					}
+				}
+				UDEBUG("Removed %d invalid 3D points", (int)keypoints3D.size()-oi);
+				validKeypoints.resize(oi);
+				validKeypoints3D.resize(oi);
+				keypoints = validKeypoints;
+				keypoints3D = validKeypoints3D;
+				descriptors = validDescriptors.rowRange(0, oi).clone();
+			}
+		}
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_3D(), t*1000.0f);
+		UDEBUG("time keypoints 3D (%d) = %fs", (int)keypoints3D.size(), t);
+
+		UDEBUG("ratio=%f, meanWordsPerLocation=%d", _badSignRatio, meanWordsPerLocation);
+		if(descriptors.rows && descriptors.rows < _badSignRatio * float(meanWordsPerLocation))
+		{
+			descriptors = cv::Mat();
+		}
+	}
+
+	if(_parallelized)
+	{
+		UDEBUG("Joining dictionary update thread...");
+		preUpdateThread.join(); // Wait the dictionary to be updated
+		UDEBUG("Joining dictionary update thread... thread finished!");
+	}
+
+	std::list<int> wordIds;
+	if(descriptors.rows)
+	{
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemJoining_dictionary_update(), t*1000.0f);
+		if(_parallelized)
+		{
+			UDEBUG("time descriptor and memory update (%d of size=%d) = %fs", descriptors.rows, descriptors.cols, t);
+		}
+		else
+		{
+			UDEBUG("time descriptor (%d of size=%d) = %fs", descriptors.rows, descriptors.cols, t);
+		}
+
+		// In case the number of features we want to do quantization is lower
+		// than extracted ones (that would be used for transform estimation)
+		std::vector<bool> inliers;
+		cv::Mat descriptorsForQuantization = descriptors;
+		std::vector<int> quantizedToRawIndices;
+		if(_feature2D->getMaxFeatures()>0 && descriptors.rows > _feature2D->getMaxFeatures())
+		{
+			UASSERT((int)keypoints.size() == descriptors.rows);
+			Feature2D::limitKeypoints(keypoints, inliers, _feature2D->getMaxFeatures());
+
+			descriptorsForQuantization = cv::Mat(_feature2D->getMaxFeatures(), descriptors.cols, descriptors.type());
+			quantizedToRawIndices.resize(_feature2D->getMaxFeatures());
+			unsigned int oi=0;
+			UASSERT((int)inliers.size() == descriptors.rows);
+			for(int k=0; k < descriptors.rows; ++k)
+			{
+				if(inliers[k])
+				{
+					UASSERT(oi < quantizedToRawIndices.size());
+					if(descriptors.type() == CV_32FC1)
+					{
+						memcpy(descriptorsForQuantization.ptr<float>(oi), descriptors.ptr<float>(k), descriptors.cols*sizeof(float));
+					}
+					else
+					{
+						memcpy(descriptorsForQuantization.ptr<char>(oi), descriptors.ptr<char>(k), descriptors.cols*sizeof(char));
+					}
+					quantizedToRawIndices[oi] = k;
+					++oi;
+				}
+			}
+			UASSERT((int)oi == _feature2D->getMaxFeatures());
+		}
+
+		// Quantization to vocabulary
+		wordIds = _vwd->addNewWords(descriptorsForQuantization, id);
+
+		// Set ID -1 to features not used for quantization
+		if(wordIds.size() < keypoints.size())
+		{
+			std::vector<int> allWordIds;
+			allWordIds.resize(keypoints.size(),-1);
+			int i=0;
+			for(std::list<int>::iterator iter=wordIds.begin(); iter!=wordIds.end(); ++iter)
+			{
+				allWordIds[quantizedToRawIndices[i]] = *iter;
+				++i;
+			}
+			wordIds = uVectorToList(allWordIds);
+		}
+
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemAdd_new_words(), t*1000.0f);
+		UDEBUG("time addNewWords %fs indexed=%d not=%d", t, _vwd->getIndexedWordsCount(), _vwd->getNotIndexedWordsCount());
+	}
+	else if(id>0)
+	{
+		UDEBUG("id %d is a bad signature", id);
+	}
+
+	std::multimap<int, cv::KeyPoint> words;
+	std::multimap<int, cv::Point3f> words3D;
+	std::multimap<int, cv::Mat> wordsDescriptors;
+	if(wordIds.size() > 0)
+	{
+		UASSERT(wordIds.size() == keypoints.size());
+		UASSERT(keypoints3D.size() == 0 || keypoints3D.size() == wordIds.size());
+		unsigned int i=0;
+		float decimationRatio = preDecimation / _imagePostDecimation;
+		double log2value = log(double(preDecimation))/log(2.0);
+		for(std::list<int>::iterator iter=wordIds.begin(); iter!=wordIds.end() && i < keypoints.size(); ++iter, ++i)
+		{
+			cv::KeyPoint kpt = keypoints[i];
+			if(preDecimation != _imagePostDecimation)
+			{
+				// remap keypoints to final image size
+				kpt.pt.x *= decimationRatio;
+				kpt.pt.y *= decimationRatio;
+				kpt.size *= decimationRatio;
+				kpt.octave += log2value;
+			}
+			words.insert(std::pair<int, cv::KeyPoint>(*iter, kpt));
+
+			if(keypoints3D.size())
+			{
+				words3D.insert(std::pair<int, cv::Point3f>(*iter, keypoints3D.at(i)));
+			}
+			if(_rawDescriptorsKept)
+			{
+				wordsDescriptors.insert(std::pair<int, cv::Mat>(*iter, descriptors.row(i).clone()));
+			}
+		}
+	}
+
+	if(!clientSignature->getPose().isNull() &&
+		clientSignature->sensorData().cameraModels().size() == 1 &&
+		words.size() &&
+		words3D.size() == 0 &&
+		_signatures.size() &&
+		_signatures.rbegin()->second->mapId() == _idMapCount) // same map
+	{
+		UDEBUG("Generate 3D words using odometry");
+		Signature * previousS = _signatures.rbegin()->second;
+		if(previousS->getWords().size() > 8 && words.size() > 8 && !previousS->getPose().isNull())
+		{
+			Transform cameraTransform = clientSignature->getPose().inverse() * previousS->getPose();
+			// compute 3D words by epipolar geometry with the previous signature
+			std::map<int, cv::Point3f> inliers = util3d::generateWords3DMono(
+					uMultimapToMapUnique(words),
+					uMultimapToMapUnique(previousS->getWords()),
+					clientSignature->sensorData().cameraModels()[0],
+					cameraTransform);
+
+			// words3D should have the same size than words
+			float bad_point = std::numeric_limits<float>::quiet_NaN ();
+			for(std::multimap<int, cv::KeyPoint>::const_iterator iter=words.begin(); iter!=words.end(); ++iter)
+			{
+				std::map<int, cv::Point3f>::iterator jter=inliers.find(iter->first);
+				if(jter != inliers.end())
+				{
+					words3D.insert(std::make_pair(iter->first, jter->second));
+				}
+				else
+				{
+					words3D.insert(std::make_pair(iter->first, cv::Point3f(bad_point,bad_point,bad_point)));
+				}
+			}
+
+			t = timer.ticks();
+			UASSERT(words3D.size() == words.size());
+			if(stats) stats->addStatistic(Statistics::kTimingMemKeypoints_3D(), t*1000.0f);
+			UDEBUG("time keypoints 3D (%d) = %fs", (int)words3D.size(), t);
+		}
+	}
+
+	cv::Mat image = clientSignature->sensorData().imageRaw();
+	cv::Mat depthOrRightImage = clientSignature->sensorData().depthOrRightRaw();
+	std::vector<CameraModel> cameraModels = clientSignature->sensorData().cameraModels();
+	StereoCameraModel stereoCameraModel = clientSignature->sensorData().stereoCameraModel();
+
+	// apply decimation?
+	if(_imagePostDecimation > 1 && !isIntermediateNode)
+	{
+		if(!clientSignature->sensorData().rightRaw().empty() ||
+			(clientSignature->sensorData().depthRaw().rows == image.rows && clientSignature->sensorData().depthRaw().cols == image.cols))
+		{
+			depthOrRightImage = util2d::decimate(depthOrRightImage, _imagePostDecimation);
+		}
+		image = util2d::decimate(image, _imagePostDecimation);
+		for(unsigned int i=0; i<cameraModels.size(); ++i)
+		{
+			cameraModels[i] = cameraModels[i].scaled(1.0/double(_imagePostDecimation));
+		}
+		if(stereoCameraModel.isValidForProjection())
+		{
+			stereoCameraModel.scale(1.0/double(_imagePostDecimation));
+		}
+
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemPost_decimation(), t*1000.0f);
+		UDEBUG("time post-decimation = %fs", t);
+	}
+
+	// downsampling the laser scan?
+	cv::Mat laserScan = clientSignature->sensorData().laserScanRaw();
+	int maxLaserScanMaxPts = clientSignature->sensorData().laserScanInfo().maxPoints();
+	if(!laserScan.empty() && _laserScanDownsampleStepSize > 1 && !isIntermediateNode)
+	{
+		laserScan = util3d::downsample(laserScan, _laserScanDownsampleStepSize);
+		maxLaserScanMaxPts /= _laserScanDownsampleStepSize;
+
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemScan_downsampling(), t*1000.0f);
+		UDEBUG("time downsampling scan = %fs", t);
+	}
+	if(!laserScan.empty() && _laserScanVoxelSize > 0.0f && !isIntermediateNode)
+	{
+		float pointsBeforeFiltering = laserScan.cols;
+		if(laserScan.channels() == 4 || laserScan.channels() == 7)
+		{
+			pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud = util3d::laserScanToPointCloudRGB(laserScan);
+			cloud = util3d::voxelize(cloud, _laserScanVoxelSize);
+			laserScan = util3d::laserScanFromPointCloud(*cloud);
+		}
+		else
+		{
+			pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = util3d::laserScanToPointCloud(laserScan);
+			cloud = util3d::voxelize(cloud, _laserScanVoxelSize);
+			if(laserScan.channels() == 2 || laserScan.channels() == 5)
+			{
+				laserScan = util3d::laserScan2dFromPointCloud(*cloud);
+			}
+			else
+			{
+				laserScan = util3d::laserScanFromPointCloud(*cloud);
+			}
+		}
+		float ratio = float(laserScan.cols) / pointsBeforeFiltering;
+		maxLaserScanMaxPts = int(float(maxLaserScanMaxPts) * ratio);
+
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemScan_voxel_filtering(), t*1000.0f);
+		UDEBUG("time voxel filtering scan = %fs", t);
+	}
+	if(!laserScan.empty() &&
+		(_laserScanNormalK > 0 || _laserScanNormalRadius>0.0f) &&
+		laserScan.channels() > 1 && laserScan.channels() < 5 &&
+		!isIntermediateNode)
+	{
+		laserScan = util3d::computeNormals(laserScan, _laserScanNormalK, _laserScanNormalRadius);
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemScan_normals(), t*1000.0f);
+		UDEBUG("time normals scan = %fs", t);
+	}
+
+	Signature * s;
+	if(this->isBinDataKept() && (!isIntermediateNode || _saveIntermediateNodeData))
+	{
+		UDEBUG("Bin data kept: rgb=%d, depth=%d, scan=%d, userData=%d",
+				image.empty()?0:1,
+				depthOrRightImage.empty()?0:1,
+				laserScan.empty()?0:1,
+				clientSignature->sensorData().userDataRaw().empty()?0:1);
+
+		std::vector<unsigned char> imageBytes;
+		std::vector<unsigned char> depthBytes;
+
+		if(_saveDepth16Format && !depthOrRightImage.empty() && depthOrRightImage.type() == CV_32FC1)
+		{
+			UWARN("Save depth data to 16 bits format: depth type detected is 32FC1, use 16UC1 depth format to avoid this conversion (or set parameter \"Mem/SaveDepth16Format\"=false to use 32bits format).");
+			depthOrRightImage = util2d::cvtDepthFromFloat(depthOrRightImage);
+		}
+
+		cv::Mat compressedImage;
+		cv::Mat compressedDepth;
+		cv::Mat compressedScan;
+		cv::Mat compressedUserData;
+		if(_compressionParallelized)
+		{
+			rtabmap::CompressionThread ctImage(image, std::string(".jpg"));
+			rtabmap::CompressionThread ctDepth(depthOrRightImage, std::string(".png"));
+			rtabmap::CompressionThread ctLaserScan(laserScan);
+			rtabmap::CompressionThread ctUserData(clientSignature->sensorData().userDataRaw());
+			if(!image.empty())
+			{
+				ctImage.start();
+			}
+			if(!depthOrRightImage.empty())
+			{
+				ctDepth.start();
+			}
+			if(!laserScan.empty())
+			{
+				ctLaserScan.start();
+			}
+			if(!clientSignature->sensorData().userDataRaw().empty())
+			{
+				ctUserData.start();
+			}
+			ctImage.join();
+			ctDepth.join();
+			ctLaserScan.join();
+			ctUserData.join();
+
+			compressedImage = ctImage.getCompressedData();
+			compressedDepth = ctDepth.getCompressedData();
+			compressedScan = ctLaserScan.getCompressedData();
+			compressedUserData = ctUserData.getCompressedData();
+		}
+		else
+		{
+			compressedImage = compressImage2(image, std::string(".jpg"));
+			compressedDepth = compressImage2(depthOrRightImage, depthOrRightImage.type() == CV_32FC1 || depthOrRightImage.type() == CV_16UC1?std::string(".png"):std::string(".jpg"));
+			compressedScan = compressData2(laserScan);
+			compressedUserData = compressData2(clientSignature->sensorData().userDataRaw());
+		}
+
+		s = new Signature(id,
+			_idMapCount,
+			isIntermediateNode?-1:0, // tag intermediate nodes as weight=-1
+			clientSignature->sensorData().stamp(),
+			"",
+			clientSignature->getPose(),
+			clientSignature->sensorData().groundTruth(),
+			stereoCameraModel.isValidForProjection()?
+				SensorData(
+						compressedScan,
+						LaserScanInfo(maxLaserScanMaxPts, clientSignature->sensorData().laserScanInfo().maxRange(), clientSignature->sensorData().laserScanInfo().localTransform()),
+						compressedImage,
+						compressedDepth,
+						stereoCameraModel,
+						id,
+						0,
+						compressedUserData):
+				SensorData(
+						compressedScan,
+						LaserScanInfo(maxLaserScanMaxPts, clientSignature->sensorData().laserScanInfo().maxRange(), clientSignature->sensorData().laserScanInfo().localTransform()),
+						compressedImage,
+						compressedDepth,
+						cameraModels,
+						id,
+						0,
+						compressedUserData));
+	}
+	else
+	{
+		UDEBUG("Bin data kept: scan=%d, userData=%d",
+						laserScan.empty()?0:1,
+						clientSignature->sensorData().userDataRaw().empty()?0:1);
+
+		// just compress user data and laser scan (scans can be used for local scan matching)
+		cv::Mat compressedScan;
+		cv::Mat compressedUserData;
+		if(_compressionParallelized)
+		{
+			rtabmap::CompressionThread ctUserData(clientSignature->sensorData().userDataRaw());
+			rtabmap::CompressionThread ctLaserScan(laserScan);
+			if(!clientSignature->sensorData().userDataRaw().empty() && !isIntermediateNode)
+			{
+				ctUserData.start();
+			}
+			if(!laserScan.empty() && !isIntermediateNode)
+			{
+				ctLaserScan.start();
+			}
+			ctUserData.join();
+			ctLaserScan.join();
+
+			compressedScan = ctLaserScan.getCompressedData();
+			compressedUserData = ctUserData.getCompressedData();
+		}
+		else
+		{
+			compressedScan = compressData2(laserScan);
+			compressedUserData = compressData2(clientSignature->sensorData().userDataRaw());
+		}
+
+		s = new Signature(id,
+			_idMapCount,
+			isIntermediateNode?-1:0, // tag intermediate nodes as weight=-1
+			clientSignature->sensorData().stamp(),
+			"",
+			clientSignature->getPose(),
+			clientSignature->sensorData().groundTruth(),
+			stereoCameraModel.isValidForProjection()?
+				SensorData(
+						compressedScan,
+						LaserScanInfo(maxLaserScanMaxPts, clientSignature->sensorData().laserScanInfo().maxRange(), clientSignature->sensorData().laserScanInfo().localTransform()),
+						cv::Mat(),
+						cv::Mat(),
+						stereoCameraModel,
+						id,
+						0,
+						compressedUserData):
+				SensorData(
+						compressedScan,
+						LaserScanInfo(maxLaserScanMaxPts, clientSignature->sensorData().laserScanInfo().maxRange(), clientSignature->sensorData().laserScanInfo().localTransform()),
+						cv::Mat(),
+						cv::Mat(),
+						cameraModels,
+						id,
+						0,
+						compressedUserData));
+	}
+
+	s->setWords(words);
+	s->setWords3(words3D);
+	s->setWordsDescriptors(wordsDescriptors);
+
+	// set raw data
+	s->sensorData().setImageRaw(image);
+	s->sensorData().setDepthOrRightRaw(depthOrRightImage);
+	s->sensorData().setLaserScanRaw(laserScan, LaserScanInfo(maxLaserScanMaxPts, clientSignature->sensorData().laserScanInfo().maxRange(), clientSignature->sensorData().laserScanInfo().localTransform()));
+	s->sensorData().setUserDataRaw(clientSignature->sensorData().userDataRaw());
+
+	s->sensorData().setGroundTruth(clientSignature->sensorData().groundTruth());
+	s->sensorData().setGPS(clientSignature->sensorData().gps());
+
+	t = timer.ticks();
+	if(stats) stats->addStatistic(Statistics::kTimingMemCompressing_data(), t*1000.0f);
+	UDEBUG("time compressing data (id=%d) %fs", id, t);
+	if(words.size())
+	{
+		s->setEnabled(true); // All references are already activated in the dictionary at this point (see _vwd->addNewWords())
+	}
+
+	// Occupancy grid map stuff
+	cv::Mat ground, obstacles;
+	float cellSize = 0.0f;
+	cv::Point3f viewPoint(0,0,0);
+	if(_createOccupancyGrid && !clientSignature->sensorData().depthOrRightRaw().empty() && !isIntermediateNode)
+	{
+		_occupancy->createLocalMap(*s, ground, obstacles, viewPoint);
+		cellSize = _occupancy->getCellSize();
+
+		t = timer.ticks();
+		if(stats) stats->addStatistic(Statistics::kTimingMemOccupancy_grid(), t*1000.0f);
+		UDEBUG("time grid map = %fs", t);
+	}
+	s->sensorData().setOccupancyGrid(ground, obstacles, cellSize, viewPoint);
+
+	// prior
+	if(!isIntermediateNode)
+	{
+		if(!clientSignature->sensorData().globalPose().isNull() && clientSignature->sensorData().globalPoseCovariance().cols==6 && 
+		clientSignature->sensorData().globalPoseCovariance().rows==6 && clientSignature->sensorData().globalPoseCovariance().cols==CV_64FC1)
+		{
+			s->addLink(Link(s->id(), s->id(), Link::kPosePrior, clientSignature->sensorData().globalPose(), clientSignature->sensorData().globalPoseCovariance().inv()));
+
+			/*if(clientSignature->sensorData().gps().stamp() > 0.0)
+			{
+				UWARN("GPS constraint ignored as global pose is also set.");
+			}*/
+		}
+		else if(clientSignature->sensorData().gps().stamp() > 0.0)
+		{
+			// TODO: What kind of covariance should we set to have decent gtsam and g2o results!?
+			/*if(_gpsOrigin.stamp() <= 0.0)
+			{
+				_gpsOrigin =  clientSignature->sensorData().gps();
+			}
+			cv::Point3f pt = clientSignature->sensorData().gps().toGeodeticCoords().toENU_WGS84(_gpsOrigin.toGeodeticCoords());
+			Transform gpsPose(pt.x, pt.y, clientSignature->getPose().z(), 0, 0, -(clientSignature->sensorData().gps().bearing()-90.0)*180.0/M_PI);
+			cv::Mat gpsInfMatrix = cv::Mat::eye(6,6,CV_64FC1)*0.00000001;
+			if(clientSignature->sensorData().gps().error() > 0.0)
+			{
+				// only set x, y as we don't know variance for other degrees of freedom.
+				gpsInfMatrix.at<double>(0,0) = gpsInfMatrix.at<double>(1,1) = 0.1;
+				gpsInfMatrix.at<double>(2,2) = 100000;
+				s->addLink(Link(s->id(), s->id(), Link::kPosePrior, gpsPose, gpsInfMatrix));
+			}
+			else
+			{
+				UERROR("Invalid GPS error value (%f m), must be > 0 m.", clientSignature->sensorData().gps().error());
+			}*/
+		}
+	}
+
+	UDEBUG("ID of Signature Created %d", id);
 
 	return s;
 }

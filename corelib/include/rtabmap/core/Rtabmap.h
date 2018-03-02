@@ -40,6 +40,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <stack>
 #include <set>
+#include <vector>
 
 namespace rtabmap
 {
@@ -81,6 +82,22 @@ public:
 			float odomAngularVariance,
 			const std::vector<float> & odomVelocity = std::vector<float>(),
 			const std::map<std::string, float> & externalStats = std::map<std::string, float>());
+	// RST_Vallejo: Modified function created for MapOptimizerServer, which directly receives signature information
+	bool process(
+			Signature * clientSignature,
+			const std::map<int, rtabmap::Transform> & clientPoses,
+			const std::multimap<int, rtabmap::Link> & clientLinks,
+			const std::vector<float> & odomVelocity = std::vector<float>(),
+			const std::map<std::string, float> & externalStats = std::map<std::string, float>());
+	// RST_Vallejo: Modified function created for MapOptimizerServer, which directly receives signature information
+	// bool process(
+	// 		Signature * clientSignature,
+	// 		float odomLinearVariance,
+	// 		float odomAngularVariance,
+	// 		const std::vector<float> & odomVelocity = std::vector<float>(),
+	// 		const std::map<std::string, float> & externalStats = std::map<std::string, float>());
+	// RST_Vallejo: Function to extract robot number information from the Client Signature received (Multirobot Mode)
+	unsigned int getRobotNumber(Signature * clientSignature);
 	// for convenience, loop closure detection only
 	bool process(
 			const cv::Mat & image,
@@ -106,7 +123,7 @@ public:
 	float getHighestHypothesisValue() const {return _highestHypothesis.second;}
 	int getLastLocationId() const;
 	std::list<int> getWM() const; // working memory
-	std::set<int> getSTM() const; // short-term memory
+	std::deque<int> getSTM() const; // RST_Vallejo: short-term memory as a queue
 	int getWMSize() const; // working memory size
 	int getSTMSize() const; // short-term memory size
 	std::map<int, int> getWeights() const;
@@ -120,6 +137,7 @@ public:
 	const std::map<int, Transform> & getLocalOptimizedPoses() const {return _optimizedPoses;}
 	Transform getPose(int locationId) const;
 	Transform getMapCorrection() const {return _mapCorrection;}
+	std::vector<Transform> getMultiCorrection() const {return _multiCorrection;}
 	const Memory * getMemory() const {return _memory;}
 	float getGoalReachedRadius() const {return _goalReachedRadius;}
 	float getLocalRadius() const {return _localRadius;}
@@ -277,8 +295,10 @@ private:
 
 	std::map<int, Transform> _optimizedPoses;
 	std::multimap<int, Link> _constraints;
-	Transform _mapCorrection;
+	Transform _mapCorrection;	// RST_Vallejo: Keeping track of each robot map to odom transformation
 	Transform _mapCorrectionBackup; // used in localization mode when odom is lost
+	std::vector<Transform> _multiCorrection;	// RST_Vallejo: Keeping track of each robot map to odom transformation in Multirobot mode
+	std::vector<Transform> _multiCorrectionBackup; // used in localization mode when odom is lost
 	Transform _lastLocalizationPose; // Corrected odometry pose. In mapping mode, this corresponds to last pose return by getLocalOptimizedPoses().
 	int _lastLocalizationNodeId; // for localization mode
 

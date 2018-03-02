@@ -405,8 +405,8 @@ Transform OdometryMono::computeTransform(SensorData & data, const Transform & gu
 							}
 
 							//Find the frame with the most similar features
-							std::set<int> stMem =  memory_->getStMem();
-							stMem.erase(newS->id());
+							std::deque<int> stMem =  memory_->getStMem();
+							stMem.erase(std::find(stMem.begin(), stMem.end(), newS->id()));
 							std::map<int, float> likelihood = memory_->computeLikelihood(newS, std::list<int>(stMem.begin(), stMem.end()));
 							int maxLikelihoodId = -1;
 							float maxLikelihood = 0;

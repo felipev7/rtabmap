@@ -39,6 +39,7 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <list>
 #include <map>
 #include <set>
+#include <deque>				// RST_Vallejo: For STM implementation as a queue
 #include "rtabmap/utilite/UStl.h"
 #include <opencv2/core/core.hpp>
 #include <opencv2/features2d/features2d.hpp>
@@ -62,6 +63,7 @@ class RTABMAP_EXP Memory
 {
 public:
 	static const int kIdStart;
+	static const int kMapIdStart;
 	static const int kIdVirtual;
 	static const int kIdInvalid;
 
@@ -76,6 +78,12 @@ public:
 	bool update(const SensorData & data,
 			const Transform & pose,
 			const cv::Mat & covariance,
+			const std::vector<float> & velocity = std::vector<float>(), // vx,vy,vz,vroll,vpitch,vyaw
+			Statistics * stats = 0);
+	// RST_Vallejo: Modified function created for MapOptimizerServer, which directly receives signature information
+	bool update(Signature * clientSignature,
+			const std::map<int, rtabmap::Transform> & clientPoses,
+			const std::multimap<int, rtabmap::Link> & clientLinks,
 			const std::vector<float> & velocity = std::vector<float>(), // vx,vy,vz,vroll,vpitch,vyaw
 			Statistics * stats = 0);
 	bool init(const std::string & dbUrl,
@@ -141,7 +149,8 @@ public:
 
 	//getters
 	const std::map<int, double> & getWorkingMem() const {return _workingMem;}
-	const std::set<int> & getStMem() const {return _stMem;}
+	const std::deque<int> & getStMem() const {return _stMem;}		// RST_Vallejo: Modified function for queue functionality
+	unsigned int getRobotNum(Signature * clientSignature);	// RST_Vallejo: Function to extract robot number information
 	int getMaxStMemSize() const {return _maxStMemSize;}
 	std::map<int, Link> getNeighborLinks(int signatureId,
 			bool lookInDatabase = false) const;
@@ -195,7 +204,7 @@ public:
 	bool memoryChanged() const {return _memoryChanged;}
 	bool isIncremental() const {return _incrementalMemory;}
 	const Signature * getSignature(int id) const;
-	bool isInSTM(int signatureId) const {return _stMem.find(signatureId) != _stMem.end();}
+	bool isInSTM(int signatureId) const {return std::find(_stMem.begin(), _stMem.end(), signatureId) != _stMem.end();}	// RST_Vallejo: Modified isInSTM function
 	bool isInWM(int signatureId) const {return _workingMem.find(signatureId) != _workingMem.end();}
 	bool isInLTM(int signatureId) const {return !this->isInSTM(signatureId) && !this->isInWM(signatureId);}
 	bool isIDsGenerated() const {return _generateIds;}
@@ -232,6 +241,11 @@ public:
 private:
 	void preUpdate();
 	void addSignatureToStm(Signature * signature, const cv::Mat & covariance);
+	// RST_Vallejo: Modified addSignatureToStm function for Multirobot environment
+	void addSignatureToStm(
+			Signature * signature,
+			const std::map<int, rtabmap::Transform> & clientPoses,
+			const std::multimap<int, rtabmap::Link> & clientLinks);
 	void clear();
 	void loadDataFromDb(bool postInitClosingEvents);
 	void moveToTrash(Signature * s, bool keepLinkedToGraph = true, std::list<int> * deletedWords = 0);
@@ -252,6 +266,9 @@ private:
 	Signature * createSignature(
 			const SensorData & data,
 			const Transform & pose,
+			Statistics * stats = 0);
+	Signature * processSignature(
+			Signature * clientSignature,
 			Statistics * stats = 0);
 
 	//keypoint stuff
@@ -293,6 +310,9 @@ private:
 	float _rehearsalMaxAngle;
 	bool _rehearsalWeightIgnoredWhileMoving;
 	bool _useOdometryFeatures;
+	bool _multiRobotMode;		// RST_Vallejo: Multirobot mode On/Off
+	bool _multiRobotMaster;		// RST_Vallejo: For Multirobot mode. Client side
+	int _clientRobotNumber;		// RST_Vallejo: When running in the robot, Number of the Client Robot when in Multirobot Mode
 	bool _createOccupancyGrid;
 	int _visMaxFeatures;
 
@@ -306,7 +326,7 @@ private:
 	GPS _gpsOrigin;
 
 	std::map<int, Signature *> _signatures; // TODO : check if a signature is already added? although it is not supposed to occur...
-	std::set<int> _stMem; // id
+	std::deque<int> _stMem; // RST_Vallejo: Managing STM as a FIFO queue of IDs
 	std::map<int, double> _workingMem; // id,age
 
 	//Keypoint stuff

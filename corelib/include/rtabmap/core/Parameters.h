@@ -216,6 +216,9 @@ class RTABMAP_EXP Parameters
     RTABMAP_PARAM(Mem, LaserScanNormalK,            int, 0,         "If > 0 and laser scans don't have normals, normals will be computed with K search neighbors when creating a signature.");
     RTABMAP_PARAM(Mem, LaserScanNormalRadius,       int, 0,         "If > 0 m and laser scans don't have normals, normals will be computed with radius search neighbors when creating a signature.");
     RTABMAP_PARAM(Mem, UseOdomFeatures,             bool, false,    "Use odometry features.");
+    RTABMAP_PARAM(Mem, MultiRobotMode,              bool, false,    "Multirobot RGBDSLAM");  // RST_Vallejo: true = Multirobot, false = Single robot
+    RTABMAP_PARAM(Mem, MultiRobotMaster,            bool, false,    "Multirobot RGBDSLAM activated on Server or Client Mode.");  // RST_Vallejo
+    RTABMAP_PARAM(Mem, ClientRobotNumber,           int, 0,         "Robot number when in Multirobot Client Mode.");  // RST_Vallejo: Robot number 
 
     // KeypointMemory (Keypoint-based)
     RTABMAP_PARAM(Kp, NNStrategy,               int, 1,       "kNNFlannNaive=0, kNNFlannKdTree=1, kNNFlannLSH=2, kNNBruteForce=3, kNNBruteForceGPU=4");
