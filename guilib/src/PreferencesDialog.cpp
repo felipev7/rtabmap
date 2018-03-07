@@ -672,6 +672,9 @@ PreferencesDialog::PreferencesDialog(QWidget * parent) :
 	_ui->general_spinBox_laserScanNormalK->setObjectName(Parameters::kMemLaserScanNormalK().c_str());
 	_ui->general_doubleSpinBox_laserScanNormalRadius->setObjectName(Parameters::kMemLaserScanNormalRadius().c_str());
 	_ui->checkBox_useOdomFeatures->setObjectName(Parameters::kMemUseOdomFeatures().c_str());
+	_ui->general_checkBox_MultirobotMode->setObjectName(Parameters::kMemMultiRobotMode().c_str()); 		// RST_Vallejo
+	_ui->general_checkBox_MultirobotMaster->setObjectName(Parameters::kMemMultiRobotMaster().c_str()); 	// RST_Vallejo
+	_ui->general_spinBox_ClientRobotNumber->setObjectName(Parameters::kMemClientRobotNumber().c_str());	// RST_Vallejo
 
 	// Database
 	_ui->checkBox_dbInMemory->setObjectName(Parameters::kDbSqlite3InMemory().c_str());
