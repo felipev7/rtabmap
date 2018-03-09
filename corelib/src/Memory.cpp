@@ -2225,7 +2225,10 @@ void Memory::moveToTrash(Signature * s, bool keepLinkedToGraph, std::list<int> *
 		}
 
 		_workingMem.erase(s->id());
-		_stMem.erase(std::find(_stMem.begin(), _stMem.end(), s->id()));
+		if(std::find(_stMem.begin(), _stMem.end(), s->id()) != _stMem.end())
+		{
+			_stMem.erase(std::find(_stMem.begin(), _stMem.end(), s->id()));
+		}
 		_signatures.erase(s->id());
 		if(_signaturesAdded>0)
 		{
